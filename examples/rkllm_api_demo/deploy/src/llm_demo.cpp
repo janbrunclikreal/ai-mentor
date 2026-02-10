@@ -1,17 +1,3 @@
-// Copyright (c) 2025 by Rockchip Electronics Co., Ltd. All Rights Reserved.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 #include <string.h>
 #include <unistd.h>
 #include <string>
@@ -20,188 +6,196 @@
 #include <iostream>
 #include <csignal>
 #include <vector>
-
+#include <chrono>
+#include <fcntl.h>
+#include <ctime>
+#include <iomanip>
+#include <sstream>
 
 using namespace std;
-LLMHandle llmHandle = nullptr;
+using Clock = std::chrono::high_resolution_clock;
 
-void exit_handler(int signal)
-{
-    if (llmHandle != nullptr)
-    {
-        {
-            cout << "程序即将退出" << endl;
-            LLMHandle _tmp = llmHandle;
-            llmHandle = nullptr;
-            rkllm_destroy(_tmp);
-        }
+#define RESET   "\033[0m"
+#define BOLD    "\033[1m"
+#define GREEN   "\033[32m"
+#define BLUE    "\033[34m"
+#define YELLOW  "\033[33m"
+#define RED     "\033[31m"
+#define CYAN    "\033[36m"
+
+LLMHandle llmHandle = nullptr;
+static Clock::time_point infer_start;
+static int token_count = 0;
+static int total_queries = 0;
+static bool is_pipe = false;
+static string current_response = "";
+static string last_query = "";
+static string current_model_name = "";
+
+const string SYSTEM_PROMPT = "Jsi technický mentor. Tvůj žák je Jan (muž). Oslovuj ho výhradně jménem Jan nebo Jane. Mluv vždy česky, věcně a technicky přesně. ";
+const string LOG_DIR = "/home/orangepi/.local/share/ai-mentor/";
+
+// Funkce pro bezpečné ošetření textu do CSV (zdvojení uvozovek)
+string escape_csv(string text) {
+    string escaped = "";
+    for (char c : text) {
+        if (c == '"') escaped += "\"\"";
+        else escaped += c;
     }
-    exit(signal);
+    return escaped;
 }
 
-int callback(RKLLMResult *result, void *userdata, LLMCallState state)
-{
-    if (state == RKLLM_RUN_FINISH)
-    {
-        printf("\n");
-    } else if (state == RKLLM_RUN_ERROR) {
-        printf("\\run error\n");
-    } else if (state == RKLLM_RUN_NORMAL) {
-        /* ================================================================================================================
-        若使用GET_LAST_HIDDEN_LAYER功能,callback接口会回传内存指针:last_hidden_layer,token数量:num_tokens与隐藏层大小:embd_size
-        通过这三个参数可以取得last_hidden_layer中的数据
-        注:需要在当前callback中获取,若未及时获取,下一次callback会将该指针释放
-        ===============================================================================================================*/
-        if (result->last_hidden_layer.embd_size != 0 && result->last_hidden_layer.num_tokens != 0) {
-            int data_size = result->last_hidden_layer.embd_size * result->last_hidden_layer.num_tokens * sizeof(float);
-            printf("\ndata_size:%d",data_size);
-            std::ofstream outFile("last_hidden_layer.bin", std::ios::binary);
-            if (outFile.is_open()) {
-                outFile.write(reinterpret_cast<const char*>(result->last_hidden_layer.hidden_states), data_size);
-                outFile.close();
-                std::cout << "Data saved to output.bin successfully!" << std::endl;
-            } else {
-                std::cerr << "Failed to open the file for writing!" << std::endl;
-            }
+// Funkce pro zápis do CSV s denní rotací názvu souboru
+void write_to_csv(const string& query, const string& response, int tokens, double seconds) {
+    // Generování názvu souboru podle aktuálního data
+    time_t now = time(0);
+    tm *ltm = localtime(&now);
+    stringstream ss;
+    ss << LOG_DIR << "ai-mentor_" << put_time(ltm, "%Y-%m-%d") << ".csv";
+    string filename = ss.str();
+
+    // Kontrola existence souboru pro zápis hlavičky
+    bool file_exists = ifstream(filename).good();
+    
+    ofstream csv(filename, ios::app);
+    if (csv.is_open()) {
+        if (!file_exists) {
+            // Hlavička pro MySQL import
+            csv << "timestamp;model;tokens;seconds;speed;query;response" << endl;
         }
+
+        double speed = (seconds > 0) ? (tokens / seconds) : 0;
+        char time_str[20];
+        strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M:%S", ltm);
+
+        // Zápis řádku: "hodnota";"hodnota"
+        csv << "\"" << time_str << "\";";
+        csv << "\"" << current_model_name << "\";";
+        csv << tokens << ";";
+        csv << fixed << setprecision(2) << seconds << ";";
+        csv << speed << ";";
+        csv << "\"" << escape_csv(query) << "\";";
+        csv << "\"" << escape_csv(response) << "\"" << endl;
+        
+        csv.close();
+    }
+}
+
+int callback(RKLLMResult *result, void *userdata, LLMCallState state) {
+    if (state == RKLLM_RUN_NORMAL) {
+        if (token_count == 0 && !is_pipe) cout << GREEN << BOLD << "AI Mentor: " << RESET;
         printf("%s", result->text);
+        current_response += result->text;
+        fflush(stdout);
+        token_count++; 
+    } else if (state == RKLLM_RUN_FINISH) {
+        auto infer_end = Clock::now();
+        double seconds = std::chrono::duration<double>(infer_end - infer_start).count();
+        
+        write_to_csv(last_query, current_response, token_count, seconds);
+
+        if (!is_pipe) {
+            printf("\n\n%s--- TELEMETRIE [%s] ---%s\n", YELLOW, current_model_name.c_str(), RESET);
+            printf("Dotaz: %d | Tokeny: %d | Čas: %.2f s | Rychlost: %s%.2f tok/s%s\n", 
+                   total_queries, token_count, seconds, CYAN, (token_count / seconds), RESET);
+            printf("%s------------------%s\n", YELLOW, RESET);
+        }
+        current_response = "";
+        token_count = 0;
     }
     return 0;
 }
 
-int main(int argc, char **argv)
-{
+void exit_handler(int signal) {
+    if (llmHandle != nullptr) {
+        if (!is_pipe) cout << YELLOW << "\nUvolňuji NPU zdroje..." << RESET << endl;
+        rkllm_destroy(llmHandle);
+    }
+    exit(signal);
+}
+
+int main(int argc, char **argv) {
+    is_pipe = !isatty(fileno(stdin));
     if (argc < 4) {
-        std::cerr << "Usage: " << argv[0] << " model_path max_new_tokens max_context_len\n";
+        cerr << RED << "Použití: ./ai_mentor <model_path> <max_tokens> <context_len> [\"otázka\"]" << RESET << endl;
         return 1;
     }
 
     signal(SIGINT, exit_handler);
-    printf("rkllm init start\n");
 
-    //设置参数及初始化
+    string path_str = argv[1];
+    size_t last_slash = path_str.find_last_of("/\\");
+    current_model_name = (last_slash == string::npos) ? path_str : path_str.substr(last_slash + 1);
+
+    if (!is_pipe) cout << CYAN << "Optimalizuji hardware..." << RESET << endl;
+    system("sudo /home/orangepi/.local/bin/fix_freq_rk3588.sh 2>/dev/null >/dev/null");
+
     RKLLMParam param = rkllm_createDefaultParam();
-    param.model_path = argv[1];
+    param.model_path = (char*)path_str.c_str();
+    param.max_new_tokens = atoi(argv[2]);
+    param.max_context_len = atoi(argv[3]);
+    param.top_k = 1; param.top_p = 0.9; param.temperature = 0.3;
+    param.repeat_penalty = 1.1; param.skip_special_token = true;
+    param.extend_param.n_batch = 1; param.extend_param.enabled_cpus_num = 4;
+    param.extend_param.enabled_cpus_mask = (1 << 4)|(1 << 5)|(1 << 6)|(1 << 7);
 
-    //设置采样参数
-    param.top_k = 1;
-    param.top_p = 0.95;
-    param.temperature = 0.8;
-    param.repeat_penalty = 1.1;
-    param.frequency_penalty = 0.0;
-    param.presence_penalty = 0.0;
+    int saved_stdout = -1;
+    if (is_pipe) {
+        fflush(stdout);
+        saved_stdout = dup(STDOUT_FILENO);
+        int dev_null = open("/dev/null", O_WRONLY);
+        dup2(dev_null, STDOUT_FILENO);
+        close(dev_null);
+    }
 
-    param.max_new_tokens = std::atoi(argv[2]);
-    param.max_context_len = std::atoi(argv[3]);
-    param.skip_special_token = true;
-    param.extend_param.base_domain_id = 0;
-    param.extend_param.embed_flash = 1;
-
+    if (!is_pipe) cout << CYAN << "Inicializace RKLLM..." << RESET << endl;
     int ret = rkllm_init(&llmHandle, &param, callback);
-    if (ret == 0){
-        printf("rkllm init success\n");
-    } else {
-        printf("rkllm init failed\n");
-        exit_handler(-1);
+
+    if (is_pipe) {
+        fflush(stdout);
+        dup2(saved_stdout, STDOUT_FILENO);
+        close(saved_stdout);
     }
 
-    vector<string> pre_input;
-    pre_input.push_back("现有一笼子，里面有鸡和兔子若干只，数一数，共有头14个，腿38条，求鸡和兔子各有多少只？");
-    pre_input.push_back("有28位小朋友排成一行,从左边开始数第10位是学豆,从右边开始数他是第几位?");
-    cout << "\n**********************可输入以下问题对应序号获取回答/或自定义输入********************\n"
-         << endl;
-    for (int i = 0; i < (int)pre_input.size(); i++)
-    {
-        cout << "[" << i << "] " << pre_input[i] << endl;
+    if (ret != 0) { cerr << RED << "Chyba initu: " << ret << RESET << endl; return 1; }
+
+    RKLLMInput rkllm_input{};
+    RKLLMInferParam infer_param{};
+    infer_param.mode = RKLLM_INFER_GENERATE;
+    infer_param.keep_history = 1;
+
+    if (argc >= 5 || is_pipe) {
+        string input_text;
+        if (argc >= 5) input_text = argv[4];
+        else { string line; while (getline(cin, line)) input_text += line + "\n"; }
+
+        if (!input_text.empty()) {
+            last_query = input_text;
+            string prompt = SYSTEM_PROMPT + input_text;
+            rkllm_input.input_type = RKLLM_INPUT_PROMPT;
+            rkllm_input.prompt_input = (char*)prompt.c_str();
+            total_queries++;
+            infer_start = Clock::now();
+            rkllm_run(llmHandle, &rkllm_input, &infer_param, nullptr);
+        }
+        rkllm_destroy(llmHandle);
+        return 0;
     }
-    cout << "\n*************************************************************************\n"
-         << endl;
 
-    RKLLMInput rkllm_input;
-    memset(&rkllm_input, 0, sizeof(RKLLMInput));  // 将所有内容初始化为 0
-    
-    // 初始化 infer 参数结构体
-    RKLLMInferParam rkllm_infer_params;
-    memset(&rkllm_infer_params, 0, sizeof(RKLLMInferParam));  // 将所有内容初始化为 0
-
-    // 1. 初始化并设置 LoRA 参数（如果需要使用 LoRA）
-    // RKLLMLoraAdapter lora_adapter;
-    // memset(&lora_adapter, 0, sizeof(RKLLMLoraAdapter));
-    // lora_adapter.lora_adapter_path = "qwen0.5b_fp16_lora.rkllm";
-    // lora_adapter.lora_adapter_name = "test";
-    // lora_adapter.scale = 1.0;
-    // ret = rkllm_load_lora(llmHandle, &lora_adapter);
-    // if (ret != 0) {
-    //     printf("\nload lora failed\n");
-    // }
-
-    // 加载第二个lora
-    // lora_adapter.lora_adapter_path = "Qwen2-0.5B-Instruct-all-rank8-F16-LoRA.gguf";
-    // lora_adapter.lora_adapter_name = "knowledge_old";
-    // lora_adapter.scale = 1.0;
-    // ret = rkllm_load_lora(llmHandle, &lora_adapter);
-    // if (ret != 0) {
-    //     printf("\nload lora failed\n");
-    // }
-
-    // RKLLMLoraParam lora_params;
-    // lora_params.lora_adapter_name = "test";  // 指定用于推理的 lora 名称
-    // rkllm_infer_params.lora_params = &lora_params;
-
-    // 2. 初始化并设置 Prompt Cache 参数（如果需要使用 prompt cache）
-    // RKLLMPromptCacheParam prompt_cache_params;
-    // prompt_cache_params.save_prompt_cache = true;                  // 是否保存 prompt cache
-    // prompt_cache_params.prompt_cache_path = "./prompt_cache.bin";  // 若需要保存prompt cache, 指定 cache 文件路径
-    // rkllm_infer_params.prompt_cache_params = &prompt_cache_params;
-    
-    // rkllm_load_prompt_cache(llmHandle, "./prompt_cache.bin"); // 加载缓存的cache
-
-    rkllm_infer_params.mode = RKLLM_INFER_GENERATE;
-    // By default, the chat operates in single-turn mode (no context retention)
-    // 0 means no history is retained, each query is independent
-    rkllm_infer_params.keep_history = 0;
-
-    //The model has a built-in chat template by default, which defines how prompts are formatted  
-    //for conversation. Users can modify this template using this function to customize the  
-    //system prompt, prefix, and postfix according to their needs.  
-    // rkllm_set_chat_template(llmHandle, "", "<｜User｜>", "<｜Assistant｜>");
-    
-    while (true)
-    {
-        std::string input_str;
-        printf("\n");
-        printf("user: ");
-        std::getline(std::cin, input_str);
-        if (input_str == "exit")
-        {
-            break;
-        }
-        if (input_str == "clear")
-        {
-            ret = rkllm_clear_kv_cache(llmHandle, 1, nullptr, nullptr);
-            if (ret != 0)
-            {
-                printf("clear kv cache failed!\n");
-            }
-            continue;
-        }
-        for (int i = 0; i < (int)pre_input.size(); i++)
-        {
-            if (input_str == to_string(i))
-            {
-                input_str = pre_input[i];
-                cout << input_str << endl;
-            }
-        }
+    cout << GREEN << BOLD << "AI Mentor připraven." << RESET << endl;
+    string input;
+    while (true) {
+        cout << BLUE << BOLD << "\nJan: " << RESET;
+        if (!getline(cin, input) || input == "exit") break;
+        if (input == "/clear") { rkllm_clear_kv_cache(llmHandle, 1, nullptr, nullptr); continue; }
+        last_query = input;
+        string prompt = SYSTEM_PROMPT + input;
         rkllm_input.input_type = RKLLM_INPUT_PROMPT;
-        rkllm_input.role = "user";
-        rkllm_input.prompt_input = (char *)input_str.c_str();
-        printf("robot: ");
-
-        // 若要使用普通推理功能,则配置rkllm_infer_mode为RKLLM_INFER_GENERATE或不配置参数
-        rkllm_run(llmHandle, &rkllm_input, &rkllm_infer_params, NULL);
+        rkllm_input.prompt_input = (char*)prompt.c_str();
+        total_queries++;
+        infer_start = Clock::now();
+        rkllm_run(llmHandle, &rkllm_input, &infer_param, nullptr);
     }
     rkllm_destroy(llmHandle);
-
     return 0;
 }
