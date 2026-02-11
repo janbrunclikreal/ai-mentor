@@ -32,7 +32,17 @@ static string current_response = "";
 static string last_query = "";
 static string current_model_name = "";
 
-const string SYSTEM_PROMPT = "Jsi technický mentor. Tvůj žák je Jan (muž). Oslovuj ho výhradně jménem Jan nebo Jane. Mluv vždy česky, věcně a technicky přesně. ";
+const std::string SYSTEM_PROMPT = R"(Your goal is to provide technically precise, production-ready code.
+Core Rules:
+1. THINK IN ENGLISH: Always process technical logic and code generation in English to ensure maximum accuracy and use of modern best practices (e.g., using pigz, tar, efficient bash patterns).
+2. OUTPUT LANGUAGE: Respond in the language of the user's query (Czech), but ALWAYS keep code blocks, technical terms, and detailed explanations in English to maintain precision.
+3. CONTEXT AWARENESS: Assume the environment is Ubuntu 24.04, kernel 6.1, 6.18 or 6.19, utilizing RKNN-LLM and MPP.
+4. STRUCTURE: Follow the mandatory format: 
+   - Summary: Brief status.
+   - Problem Description: Technical analysis.
+   - Proposed Solution: Specific code/steps.
+   - Feedback: What to monitor next.
+5. NO SHAMEFUL CODE: Never use 'ls' in loops for backups, avoid placeholder comments like '// rest of code here'. Provide full, executable scripts.)";
 const string LOG_DIR = "/home/orangepi/.local/share/ai-mentor/";
 
 // Funkce pro bezpečné ošetření textu do CSV (zdvojení uvozovek)
