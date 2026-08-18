@@ -1,0 +1,16 @@
+services:
+  ai-mentor:
+    image: ai-mentor-server:latest
+    container_name: ai-mentor-server
+    restart: unless-stopped
+    privileged: true
+    network_mode: host
+    devices:
+      - /dev/rknpu:/dev/rknpu
+    volumes:
+      - /home/orangepi/model/rknn:/model:ro
+      - /home/orangepi/git/ai-mentor/examples/rkllm_api_demo/deploy:/app
+    environment:
+      - LD_LIBRARY_PATH=/app/lib
+    entrypoint: ["/app/server"]
+    command: ["/model/model.rkllm"]
