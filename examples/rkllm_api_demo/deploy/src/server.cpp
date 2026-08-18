@@ -163,8 +163,8 @@ int main(int argc, char **argv) {
 
     RKLLMParam param = rkllm_createDefaultParam();
     param.model_path = argv[1];
-    param.max_context_len = 2048;
-    param.max_new_tokens = 1024;
+    param.max_context_len = 4096;
+    param.max_new_tokens = 2048;
     param.top_k = 1;
     param.top_p = 0.9f;
     param.temperature = 0.3f;
