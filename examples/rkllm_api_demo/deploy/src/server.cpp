@@ -115,7 +115,7 @@ string build_chatml_prompt(const string& json_str) {
         }
     }
 
-    // Extrakce poslední user zprávy
+    // Extrakce user zprávy
     size_t user_pos = json_str.rfind("\"user\"");
     if (user_pos != string::npos) {
         size_t c_pos = json_str.find("\"content\"", user_pos);
@@ -181,10 +181,19 @@ int main(int argc, char **argv) {
 
     httplib::Server svr;
 
+    // 1. Healthcheck pro AS, curl i dohledové skripty
+    auto health_handler = [](const httplib::Request&, httplib::Response& res) {
+        res.set_content("{\"status\":\"ok\"}\n", "application/json");
+    };
+    svr.Get("/health", health_handler);
+    svr.Get("/", health_handler);
+
+    // 2. OpenAI modely
     svr.Get("/v1/models", [](const httplib::Request&, httplib::Response& res) {
-        res.set_content("{\"object\":\"list\",\"data\":[{\"id\":\"ai-mentor\",\"object\":\"model\"}]}", "application/json");
+        res.set_content("{\"object\":\"list\",\"data\":[{\"id\":\"ai-mentor\",\"object\":\"model\",\"owned_by\":\"rkllm\"}]}", "application/json");
     });
 
+    // 3. Streaming Chat Completions
     svr.Post("/v1/chat/completions", [](const httplib::Request& req, httplib::Response& res) {
         string formatted_prompt = build_chatml_prompt(req.body);
         cout << "\n[NPU Server] Vyhodnocuji prompt:\n" << formatted_prompt << endl;
